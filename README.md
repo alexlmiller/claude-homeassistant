@@ -33,21 +33,99 @@ cd claude-homeassistant
 make setup  # Creates Python venv and installs dependencies
 ```
 
-#### 2. Configure Connection
+#### 2. Set Up SSH Access to Home Assistant
+
+**Required**: Install the [Advanced SSH & Web Terminal](https://github.com/hassio-addons/addon-ssh) add-on for Home Assistant, which provides excellent SSH/SFTP access needed for the rsync operations in this project.
+
+##### Step 2a: Generate SSH Key Pair (if you don't have one)
+
+```bash
+# Generate a new SSH key pair for Home Assistant
+ssh-keygen -t ed25519 -f ~/.ssh/homeassistant -C "your-email@example.com"
+
+# Verify the key files were created
+ls -l ~/.ssh/homeassistant*
+```
+
+This creates:
+- `~/.ssh/homeassistant` (private key - keep this secure)
+- `~/.ssh/homeassistant.pub` (public key - this goes into HA)
+
+##### Step 2b: Configure Advanced SSH & Web Terminal Add-on
+
+1. Install the **Advanced SSH & Web Terminal** add-on in Home Assistant
+2. Configure the add-on with this YAML configuration:
+
+```yaml
+username: root
+password: ""
+authorized_keys:
+  - >-
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... your-email@example.com
+sftp: true
+compatibility_mode: false
+allow_agent_forwarding: false
+allow_remote_port_forwarding: false
+allow_tcp_forwarding: false
+```
+
+**Important**: Replace the `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...` line with the contents of your `~/.ssh/homeassistant.pub` file.
+
+3. Start the add-on and ensure it's running
+
+##### Step 2c: Configure SSH Client on Your Computer
+
+Create or edit your SSH config file:
+
+```bash
+# Edit your SSH config
+nano ~/.ssh/config
+```
+
+Add this configuration:
+
+```
+# Home Assistant SSH Configuration
+Host homeassistant_ha
+  HostName homeassistant.local  # or your HA IP address
+  User root
+  IdentityFile ~/.ssh/homeassistant
+  StrictHostKeyChecking no
+```
+
+**Note**: Replace `homeassistant.local` with your Home Assistant's IP address if hostname resolution doesn't work.
+
+##### Step 2d: Test SSH Connection
+
+```bash
+# Test the SSH connection
+ssh homeassistant_ha
+
+# You should see something like:
+# ➜ ssh homeassistant_ha
+# Welcome to the Home Assistant command line.
+```
+
+If successful, you can exit with `exit` or `Ctrl+D`.
+
+#### 3. Configure Environment Variables
+
 Copy the example environment file and configure your settings:
+
 ```bash
 cp .env.example .env
 # Edit .env with your actual Home Assistant details
 ```
 
-The `.env` file should contain:
+Configure your `.env` file with these values:
+
 ```bash
 # Home Assistant Configuration
-HA_TOKEN=your_home_assistant_token
-HA_URL=http://your_homeassistant_host:8123
+HA_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...  # Long-lived access token from HA
+HA_URL=http://homeassistant.local:8123
 
 # SSH Configuration for rsync operations
-HA_HOST=your_homeassistant_host
+HA_HOST=homeassistant_ha  # Matches your SSH config Host entry
 HA_REMOTE_PATH=/config/
 
 # Local Configuration (optional - defaults provided)
@@ -57,23 +135,26 @@ VENV_PATH=venv
 TOOLS_PATH=tools
 ```
 
-Set up SSH access to your Home Assistant instance.
+**To get your HA_TOKEN**:
+1. Go to Home Assistant → Settings → People → Your Profile
+2. Scroll to "Long-lived access tokens"
+3. Click "Create Token"
+4. Give it a name like "Claude Home Assistant"
+5. Copy the token and paste it as HA_TOKEN value
 
-**Recommended**: Install the [Advanced SSH & Web Terminal](https://github.com/hassio-addons/addon-ssh) add-on for Home Assistant, which provides excellent SSH/SFTP access needed for the rsync operations in this project.
-
-#### 3. Pull Your Real Configuration
+#### 4. Pull Your Real Configuration
 ```bash
 make pull  # Downloads YOUR actual HA config, overwriting template files
 ```
 
 **Important**: This step replaces the template `config/` folder with your real Home Assistant configuration files.
 
-#### 4. Work with Your Configuration
+#### 5. Work with Your Configuration
 - Edit your real configs locally with full validation
 - Use Claude Code to create automations in natural language
 - Validation hooks automatically check syntax and entity references
 
-#### 5. Push Changes Back
+#### 6. Push Changes Back
 ```bash
 make push  # Uploads changes back to your HA instance (with validation)
 ```
@@ -257,9 +338,65 @@ The entity explorer helps you understand what's available:
 3. Check HA logs if official validation fails
 
 ### SSH Connection Issues
-1. Test connection: `ssh your_homeassistant_host`
-2. Check SSH key permissions: `chmod 600 ~/.ssh/your_key`
-3. Verify SSH config in `~/.ssh/config`
+
+#### Common SSH Problems and Solutions
+
+1. **Connection refused or timeout**:
+   ```bash
+   # Test if the SSH add-on is running
+   ssh homeassistant_ha
+   # If this fails, check if the Advanced SSH & Web Terminal add-on is started in HA
+   ```
+
+2. **Permission denied (publickey)**:
+   ```bash
+   # Check SSH key permissions
+   chmod 600 ~/.ssh/homeassistant
+   chmod 644 ~/.ssh/homeassistant.pub
+
+   # Verify your public key is correctly added to the HA SSH add-on config
+   cat ~/.ssh/homeassistant.pub
+   ```
+
+3. **Host key verification failed**:
+   ```bash
+   # Remove old host key and try again
+   ssh-keygen -R homeassistant.local
+   # Or if using IP address:
+   ssh-keygen -R 192.168.1.100
+   ```
+
+4. **SSH config issues**:
+   ```bash
+   # Test connection with verbose output
+   ssh -v homeassistant_ha
+
+   # Check your SSH config
+   cat ~/.ssh/config
+   ```
+
+5. **Advanced SSH & Web Terminal not responding**:
+   - Restart the add-on in Home Assistant
+   - Check Home Assistant logs for SSH add-on errors
+   - Verify the add-on configuration YAML is valid
+
+#### Verifying Your Setup
+
+Run these commands to verify everything is configured correctly:
+
+```bash
+# 1. Check SSH key files exist and have correct permissions
+ls -la ~/.ssh/homeassistant*
+
+# 2. Check SSH config
+grep -A 5 "Host homeassistant" ~/.ssh/config
+
+# 3. Test SSH connection
+ssh homeassistant_ha "ls /config"
+
+# 4. Test rsync (what make pull/push uses)
+rsync -avz --dry-run homeassistant_ha:/config/ ./test/
+```
 
 ### Missing Dependencies
 ```bash
