@@ -10,12 +10,13 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, TypedDict
+from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict
 
 import yaml
 
 # Import shared modules
 from ha_yaml_loader import HAYamlLoader
+from validation_config_loader import ValidationConfig
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -42,11 +43,13 @@ class ReferenceValidator:
         self.storage_dir = self.config_dir / ".storage"
         self.errors: List[str] = []
         self.warnings: List[str] = []
+        self.validation_config = ValidationConfig.get_instance()
 
         # Cache for loaded registries
         self._entities: Optional[Dict[str, Any]] = None
         self._devices: Optional[Dict[str, Any]] = None
         self._areas: Optional[Dict[str, Any]] = None
+        self._blueprints: Optional[Dict[str, Dict[str, Any]]] = None
 
     def load_entity_registry(self) -> Dict[str, Any]:
         """Load and cache entity registry.
@@ -304,6 +307,277 @@ class ReferenceValidator:
 
         return areas
 
+    # -------------------------------------------------------------------------
+    # Service Call Validation
+    # -------------------------------------------------------------------------
+
+    def extract_service_calls(self, data: Any, path: str = "") -> Set[str]:
+        """Extract service call references from configuration data.
+
+        Args:
+            data: Configuration data to search
+            path: Current path in the config (for debugging)
+
+        Returns:
+            Set of service call strings (e.g., 'light.turn_on', 'notify.mobile')
+        """
+        services = set()
+
+        if isinstance(data, dict):
+            for key, value in data.items():
+                current_path = f"{path}.{key}" if path else key
+
+                # 'service' key contains service calls
+                if key == "service" and isinstance(value, str):
+                    # Skip templates and HA tags
+                    if not value.startswith("!") and not self.is_template(value):
+                        services.add(value)
+
+                # 'action' key can also contain service calls (newer HA syntax)
+                elif key == "action" and isinstance(value, str):
+                    if "." in value and not value.startswith("!"):
+                        services.add(value)
+
+                # Recurse into nested structures
+                else:
+                    services.update(self.extract_service_calls(value, current_path))
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                current_path = f"{path}[{i}]" if path else f"[{i}]"
+                services.update(self.extract_service_calls(item, current_path))
+
+        return services
+
+    def validate_service_calls(
+        self, services: Set[str], file_path: Path
+    ) -> bool:
+        """Validate extracted service calls against known domains.
+
+        Args:
+            services: Set of service call strings
+            file_path: Source file path for error messages
+
+        Returns:
+            True if all services are valid, False otherwise
+        """
+        all_valid = True
+        builtin_domains = self.validation_config.builtin_service_domains
+
+        # Also load entities to check for script.* and scene.* services
+        entities = self.load_entity_registry()
+        script_entities = {
+            e.split(".")[1] for e in entities if e.startswith("script.")
+        }
+        scene_entities = {
+            e.split(".")[1] for e in entities if e.startswith("scene.")
+        }
+
+        for service in services:
+            if "." not in service:
+                self.warnings.append(
+                    f"{file_path}: Invalid service format '{service}' "
+                    "(expected 'domain.action')"
+                )
+                continue
+
+            domain, action = service.split(".", 1)
+
+            # Check if domain is known
+            if domain in builtin_domains:
+                logger.debug(f"Service '{service}' uses builtin domain")
+                continue
+
+            # Check for script.* services - action should match a script entity
+            if domain == "script":
+                if action not in script_entities and action != "reload":
+                    self.warnings.append(
+                        f"{file_path}: Service '{service}' references "
+                        f"unknown script (no script.{action} entity found)"
+                    )
+
+            # Check for scene.* services
+            elif domain == "scene":
+                if action not in scene_entities and action not in (
+                    "reload",
+                    "apply",
+                    "create",
+                ):
+                    self.warnings.append(
+                        f"{file_path}: Service '{service}' references "
+                        f"unknown scene (no scene.{action} entity found)"
+                    )
+
+            # Unknown domain - might be a custom integration
+            else:
+                logger.debug(
+                    f"Service '{service}' uses unknown domain '{domain}' "
+                    "(may be custom integration)"
+                )
+                # Only warn, don't error - custom integrations are common
+                self.warnings.append(
+                    f"{file_path}: Service '{service}' uses domain '{domain}' "
+                    "(not a builtin domain - may be custom integration)"
+                )
+
+        return all_valid
+
+    # -------------------------------------------------------------------------
+    # Blueprint Validation
+    # -------------------------------------------------------------------------
+
+    def load_blueprints(self) -> Dict[str, Dict[str, Any]]:
+        """Load all blueprint definitions from the blueprints directory.
+
+        Returns:
+            Dict mapping blueprint path to blueprint schema
+        """
+        if self._blueprints is not None:
+            return self._blueprints
+
+        self._blueprints = {}
+        blueprints_dir = self.config_dir / "blueprints"
+
+        if not blueprints_dir.exists():
+            logger.debug("No blueprints directory found")
+            return self._blueprints
+
+        # Search for all blueprint YAML files
+        for blueprint_file in blueprints_dir.rglob("*.yaml"):
+            try:
+                with open(blueprint_file, "r", encoding="utf-8") as f:
+                    data = yaml.load(f, Loader=HAYamlLoader)
+
+                if data and isinstance(data, dict) and "blueprint" in data:
+                    # Use relative path as key
+                    rel_path = blueprint_file.relative_to(blueprints_dir)
+                    self._blueprints[str(rel_path)] = data.get("blueprint", {})
+                    logger.debug(f"Loaded blueprint: {rel_path}")
+
+            except Exception as e:
+                logger.warning(f"Failed to load blueprint {blueprint_file}: {e}")
+
+        logger.info(f"Loaded {len(self._blueprints)} blueprints")
+        return self._blueprints
+
+    def get_blueprint_inputs(
+        self, blueprint_path: str
+    ) -> Tuple[Set[str], Set[str]]:
+        """Get required and optional inputs for a blueprint.
+
+        Args:
+            blueprint_path: Path to blueprint relative to blueprints dir
+
+        Returns:
+            Tuple of (required_inputs, optional_inputs) sets
+        """
+        blueprints = self.load_blueprints()
+
+        if blueprint_path not in blueprints:
+            return set(), set()
+
+        blueprint = blueprints[blueprint_path]
+        inputs = blueprint.get("input", {})
+
+        required = set()
+        optional = set()
+
+        for input_name, input_config in inputs.items():
+            if isinstance(input_config, dict):
+                # Has 'default' means it's optional
+                if "default" in input_config:
+                    optional.add(input_name)
+                else:
+                    required.add(input_name)
+            else:
+                # Simple input without config is required
+                required.add(input_name)
+
+        return required, optional
+
+    def validate_blueprint_automation(
+        self, automation: Dict[str, Any], file_path: Path
+    ) -> bool:
+        """Validate an automation that uses a blueprint.
+
+        Args:
+            automation: Automation configuration dict
+            file_path: Source file for error messages
+
+        Returns:
+            True if valid, False otherwise
+        """
+        if "use_blueprint" not in automation:
+            return True  # Not a blueprint-based automation
+
+        use_blueprint = automation["use_blueprint"]
+        if not isinstance(use_blueprint, dict):
+            return True
+
+        blueprint_path = use_blueprint.get("path", "")
+        if not blueprint_path:
+            self.warnings.append(
+                f"{file_path}: Blueprint automation missing 'path'"
+            )
+            return False
+
+        # Normalize blueprint path
+        # HA uses format: domain/author/blueprint_name.yaml
+        # or homeassistant/domain/name.yaml for official blueprints
+
+        # Load blueprints
+        blueprints = self.load_blueprints()
+
+        # Try to find the blueprint
+        blueprint_found = False
+        matched_path = None
+
+        for bp_path in blueprints:
+            if bp_path == blueprint_path or bp_path.endswith(blueprint_path):
+                blueprint_found = True
+                matched_path = bp_path
+                break
+
+        if not blueprint_found:
+            # Blueprint not found locally - might be from HA community
+            logger.debug(
+                f"Blueprint '{blueprint_path}' not found locally "
+                "(may be community blueprint)"
+            )
+            return True  # Don't error on community blueprints
+
+        # Validate inputs
+        required_inputs, optional_inputs = self.get_blueprint_inputs(matched_path)
+        provided_inputs = set(use_blueprint.get("input", {}).keys())
+
+        # Check for missing required inputs
+        missing_required = required_inputs - provided_inputs
+        if missing_required:
+            self.errors.append(
+                f"{file_path}: Blueprint automation missing required inputs: "
+                f"{', '.join(sorted(missing_required))}"
+            )
+            return False
+
+        # Warn about missing optional inputs (informational)
+        missing_optional = optional_inputs - provided_inputs
+        if missing_optional:
+            logger.debug(
+                f"{file_path}: Blueprint automation using defaults for: "
+                f"{', '.join(sorted(missing_optional))}"
+            )
+
+        # Check for unknown inputs
+        all_valid_inputs = required_inputs | optional_inputs
+        unknown_inputs = provided_inputs - all_valid_inputs
+        if unknown_inputs:
+            self.warnings.append(
+                f"{file_path}: Blueprint automation has unknown inputs: "
+                f"{', '.join(sorted(unknown_inputs))}"
+            )
+
+        return True
+
     def extract_entity_registry_ids(self, data: Any) -> Set[str]:
         """Extract entity registry UUID references from configuration data."""
         entity_registry_ids = set()
@@ -351,6 +625,7 @@ class ReferenceValidator:
         device_refs = self.extract_device_references(data)
         area_refs = self.extract_area_references(data)
         entity_registry_ids = self.extract_entity_registry_ids(data)
+        service_calls = self.extract_service_calls(data)
 
         # Load registries
         entities = self.load_entity_registry()
@@ -411,7 +686,31 @@ class ReferenceValidator:
             if area_id not in areas:
                 self.warnings.append(f"{file_path}: Unknown area '{area_id}'")
 
+        # Validate service calls
+        if service_calls:
+            self.validate_service_calls(service_calls, file_path)
+
+        # Validate blueprint automations
+        if file_path.name in ("automations.yaml", "automations"):
+            self._validate_automations_blueprints(data, file_path)
+
         return all_valid
+
+    def _validate_automations_blueprints(
+        self, data: Any, file_path: Path
+    ) -> None:
+        """Validate blueprint usage in automations file.
+
+        Args:
+            data: Automations file content (list of automations)
+            file_path: Source file path for error messages
+        """
+        if not isinstance(data, list):
+            return
+
+        for automation in data:
+            if isinstance(automation, dict):
+                self.validate_blueprint_automation(automation, file_path)
 
     def get_yaml_files(self) -> List[Path]:
         """Get all YAML files to validate."""
