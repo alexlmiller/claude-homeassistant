@@ -20,30 +20,33 @@ YELLOW = \033[1;33m
 RED = \033[0;31m
 NC = \033[0m # No Color
 
-.PHONY: help pull push validate backup clean setup test status entities reload format-yaml check-env
+.PHONY: help pull push push-dry-run diff rollback validate backup clean setup test status entities reload format-yaml check-env
 
 # Default target
 help:
 	@echo "$(GREEN)Home Assistant Configuration Management$(NC)"
 	@echo ""
 	@echo "Available commands:"
-	@echo "  $(YELLOW)pull$(NC)     - Pull latest config from Home Assistant"
-	@echo "  $(YELLOW)push$(NC)     - Push local config to Home Assistant (with validation)"
-	@echo "  $(YELLOW)validate$(NC) - Run all validation tests"
-	@echo "  $(YELLOW)backup$(NC)   - Create timestamped backup of current config"
-	@echo "  $(YELLOW)setup$(NC)    - Set up Python environment and dependencies"
-	@echo "  $(YELLOW)test$(NC)     - Run validation tests (alias for validate)"
-	@echo "  $(YELLOW)status$(NC)   - Show configuration status and entity counts"
-	@echo "  $(YELLOW)entities$(NC) - Explore available entities (usage: make entities [ARGS='options'])"
-	@echo "  $(YELLOW)reload$(NC)   - Reload Home Assistant configuration (without pushing)"
-	@echo "  $(YELLOW)format-yaml$(NC) - Format YAML files (usage: make format-yaml [FILES='file1.yaml file2.yaml'])"
-	@echo "  $(YELLOW)check-env$(NC) - Validate environment configuration (.env file)"
-	@echo "  $(YELLOW)clean$(NC)    - Clean up temporary files and caches"
+	@echo "  $(YELLOW)pull$(NC)         - Pull latest config from Home Assistant"
+	@echo "  $(YELLOW)push$(NC)         - Push local config to Home Assistant (with validation)"
+	@echo "  $(YELLOW)push-dry-run$(NC) - Preview what would be pushed (no changes made)"
+	@echo "  $(YELLOW)diff$(NC)         - Show differences between local and remote config"
+	@echo "  $(YELLOW)rollback$(NC)     - Restore local config from a backup"
+	@echo "  $(YELLOW)validate$(NC)     - Run all validation tests"
+	@echo "  $(YELLOW)backup$(NC)       - Create timestamped backup of current config"
+	@echo "  $(YELLOW)setup$(NC)        - Set up Python environment and dependencies"
+	@echo "  $(YELLOW)test$(NC)         - Run validation tests (alias for validate)"
+	@echo "  $(YELLOW)status$(NC)       - Show configuration status and entity counts"
+	@echo "  $(YELLOW)entities$(NC)     - Explore available entities (usage: make entities [ARGS='options'])"
+	@echo "  $(YELLOW)reload$(NC)       - Reload Home Assistant configuration (without pushing)"
+	@echo "  $(YELLOW)format-yaml$(NC)  - Format YAML files (usage: make format-yaml [FILES='file1.yaml file2.yaml'])"
+	@echo "  $(YELLOW)check-env$(NC)    - Validate environment configuration (.env file)"
+	@echo "  $(YELLOW)clean$(NC)        - Clean up temporary files and caches"
 
 # Pull configuration from Home Assistant
 pull: check-env
 	@echo "$(GREEN)Pulling configuration from Home Assistant...$(NC)"
-	@rsync -avz --delete --exclude-from=.rsync-excludes $(HA_HOST):$(HA_REMOTE_PATH) $(LOCAL_CONFIG_PATH)
+	@rsync -avz --delete --filter='merge .rsync-filter' $(HA_HOST):$(HA_REMOTE_PATH) $(LOCAL_CONFIG_PATH)
 	@echo "$(GREEN)Configuration pulled successfully!$(NC)"
 	@echo "$(YELLOW)Running validation to ensure integrity...$(NC)"
 	@$(MAKE) validate
@@ -53,11 +56,53 @@ push: check-env
 	@echo "$(GREEN)Validating configuration before push...$(NC)"
 	@$(MAKE) validate
 	@echo "$(GREEN)Validation passed! Pushing to Home Assistant...$(NC)"
-	@rsync -avz --delete --exclude-from=.rsync-excludes $(LOCAL_CONFIG_PATH) $(HA_HOST):$(HA_REMOTE_PATH)
+	@rsync -avz --delete --filter='merge .rsync-filter' $(LOCAL_CONFIG_PATH) $(HA_HOST):$(HA_REMOTE_PATH)
 	@echo "$(GREEN)Configuration pushed successfully!$(NC)"
 	@echo "$(GREEN)Reloading Home Assistant configuration...$(NC)"
 	@. $(VENV_PATH)/bin/activate && python $(TOOLS_PATH)/reload_config.py
 	@echo "$(GREEN)Configuration deployment complete!$(NC)"
+
+# Dry run push - preview what would be synced without making changes
+push-dry-run: check-env
+	@echo "$(GREEN)Previewing changes (dry run - no files will be modified)...$(NC)"
+	@echo ""
+	@rsync -avzn --delete --filter='merge .rsync-filter' $(LOCAL_CONFIG_PATH) $(HA_HOST):$(HA_REMOTE_PATH)
+	@echo ""
+	@echo "$(YELLOW)Above is a preview only. Run 'make push' to apply changes.$(NC)"
+
+# Show differences between local and remote configuration
+diff: check-env
+	@echo "$(GREEN)Comparing local and remote configuration...$(NC)"
+	@echo ""
+	@rsync -avzni --delete --filter='merge .rsync-filter' $(LOCAL_CONFIG_PATH) $(HA_HOST):$(HA_REMOTE_PATH) | grep -v "^$$" || echo "$(GREEN)No differences found.$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Legend: < = local only, > = remote only, c = changed$(NC)"
+
+# Restore configuration from a backup
+rollback:
+	@echo "$(GREEN)Available backups:$(NC)"
+	@ls -lt $(BACKUP_DIR)/*.tar.gz 2>/dev/null | head -10 || echo "$(RED)No backups found in $(BACKUP_DIR)/$(NC)"
+	@echo ""
+	@if [ -z "$(BACKUP)" ]; then \
+		echo "$(YELLOW)Usage: make rollback BACKUP=backups/ha_config_YYYYMMDD_HHMMSS.tar.gz$(NC)"; \
+		echo "$(YELLOW)Example: make rollback BACKUP=$$(ls -t $(BACKUP_DIR)/*.tar.gz 2>/dev/null | head -1)$(NC)"; \
+	else \
+		if [ -f "$(BACKUP)" ]; then \
+			echo "$(YELLOW)Restoring from: $(BACKUP)$(NC)"; \
+			echo "$(YELLOW)This will overwrite the current $(LOCAL_CONFIG_PATH) directory.$(NC)"; \
+			read -p "Continue? [y/N] " confirm; \
+			if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
+				rm -rf $(LOCAL_CONFIG_PATH); \
+				tar -xzf $(BACKUP); \
+				echo "$(GREEN)Configuration restored from $(BACKUP)$(NC)"; \
+				echo "$(YELLOW)Run 'make validate' to verify the restored configuration.$(NC)"; \
+			else \
+				echo "$(YELLOW)Rollback cancelled.$(NC)"; \
+			fi; \
+		else \
+			echo "$(RED)Backup file not found: $(BACKUP)$(NC)"; \
+		fi; \
+	fi
 
 # Run all validation tests
 validate: check-setup
