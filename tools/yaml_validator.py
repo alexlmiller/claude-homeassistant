@@ -3,72 +3,13 @@
 
 import sys
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 import yaml
 
-
-class HAYamlLoader(yaml.SafeLoader):
-    """Custom YAML loader that handles Home Assistant specific tags."""
-
-    pass
-
-
-def include_constructor(loader, node):
-    """Handle !include tag."""
-    filename = loader.construct_scalar(node)
-    return f"!include {filename}"
-
-
-def include_dir_named_constructor(loader, node):
-    """Handle !include_dir_named tag."""
-    dirname = loader.construct_scalar(node)
-    return f"!include_dir_named {dirname}"
-
-def include_dir_merge_named_constructor(loader, node):
-    """Handle !include_dir_merge_named tag."""
-    dirname = loader.construct_scalar(node)
-    return f"!include_dir_merge_named {dirname}"
-
-
-def include_dir_merge_list_constructor(loader, node):
-    """Handle !include_dir_merge_list tag."""
-    dirname = loader.construct_scalar(node)
-    return f"!include_dir_merge_list {dirname}"
-
-
-def include_dir_list_constructor(loader, node):
-    """Handle !include_dir_list tag."""
-    dirname = loader.construct_scalar(node)
-    return f"!include_dir_list {dirname}"
-
-
-def input_constructor(loader, node):
-    """Handle !input tag for blueprints."""
-    input_name = loader.construct_scalar(node)
-    return f"!input {input_name}"
-
-
-def secret_constructor(loader, node):
-    """Handle !secret tag."""
-    secret_name = loader.construct_scalar(node)
-    return f"!secret {secret_name}"
-
-
-# Register custom constructors
-HAYamlLoader.add_constructor("!include", include_constructor)
-HAYamlLoader.add_constructor(
-    "!include_dir_merge_named", include_dir_merge_named_constructor
-)
-HAYamlLoader.add_constructor(
-    "!include_dir_named", include_dir_named_constructor
-)
-HAYamlLoader.add_constructor(
-    "!include_dir_merge_list", include_dir_merge_list_constructor
-)
-HAYamlLoader.add_constructor("!include_dir_list", include_dir_list_constructor)
-HAYamlLoader.add_constructor("!input", input_constructor)
-HAYamlLoader.add_constructor("!secret", secret_constructor)
+# Import shared modules
+from ha_yaml_loader import HAYamlLoader
+from validation_config_loader import ValidationConfig
 
 
 class YAMLValidator:
@@ -79,6 +20,7 @@ class YAMLValidator:
         self.config_dir = Path(config_dir)
         self.errors: List[str] = []
         self.warnings: List[str] = []
+        self.validation_config = ValidationConfig.get_instance()
 
     def validate_yaml_syntax(self, file_path: Path) -> bool:
         """Validate YAML syntax of a single file."""
@@ -178,8 +120,11 @@ class YAMLValidator:
                 # Check for alias (recommended)
                 if "alias" not in automation:
                     self.warnings.append(
-                        f"{file_path}: Automation {i} missing 'alias' " f"(recommended)"
+                        f"{file_path}: Automation {i} missing 'alias' (recommended)"
                     )
+
+                # Check automation best practices
+                self._check_automation_best_practices(automation, file_path, i)
 
             return all_valid
         except Exception as e:
@@ -187,6 +132,18 @@ class YAMLValidator:
                 f"{file_path}: Failed to validate automations structure - {e}"
             )
             return False
+
+    def _check_automation_best_practices(
+        self, automation: Dict, file_path: Path, index: int
+    ) -> None:
+        """Check automation for best practices and recommended fields."""
+        # Check for mode field (recommended to be explicit)
+        if "mode" not in automation and "use_blueprint" not in automation:
+            alias = automation.get("alias", f"Automation {index}")
+            self.warnings.append(
+                f"{file_path}: '{alias}' - "
+                "Consider specifying 'mode' explicitly (single, restart, queued, parallel)"
+            )
 
     def validate_scripts_structure(self, file_path: Path) -> bool:
         """Validate scripts.yaml structure."""
@@ -208,7 +165,7 @@ class YAMLValidator:
             for script_name, script_config in scripts.items():
                 if not isinstance(script_config, dict):
                     self.errors.append(
-                        f"{file_path}: Script '{script_name}' must be a " f"dictionary"
+                        f"{file_path}: Script '{script_name}' must be a dictionary"
                     )
                     all_valid = False
                     continue
@@ -231,6 +188,103 @@ class YAMLValidator:
                 f"{file_path}: Failed to validate scripts structure - {e}"
             )
             return False
+
+    def check_deprecated_patterns(
+        self, data: Any, file_path: Path, context: str = "any", path: str = ""
+    ) -> None:
+        """Recursively check for deprecated patterns in configuration data."""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                current_path = f"{path}.{key}" if path else key
+
+                # Check for 'enabled: false' at automation level
+                if key == "enabled" and value is False:
+                    self.warnings.append(
+                        f"{file_path}: '{current_path}' - "
+                        "Consider disabling automations via the UI instead of 'enabled: false'"
+                    )
+
+                # Check for device_id usage
+                if key in ("device_id", "device_ids"):
+                    self.warnings.append(
+                        f"{file_path}: '{current_path}' - "
+                        "device_id references are fragile; consider using entity_id instead"
+                    )
+
+                # Recursively check nested structures
+                self.check_deprecated_patterns(value, file_path, context, current_path)
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                current_path = f"{path}[{i}]"
+                self.check_deprecated_patterns(item, file_path, context, current_path)
+
+    def check_hardcoded_urls(self, data: Any, file_path: Path, path: str = "") -> None:
+        """Check for hardcoded URLs that should be in secrets.yaml."""
+        if isinstance(data, str):
+            for pattern_config in self.validation_config.hardcoded_url_patterns:
+                pattern = pattern_config.get("pattern", "")
+                message = pattern_config.get(
+                    "message", f"Hardcoded URL containing '{pattern}'"
+                )
+                if pattern and pattern in data:
+                    self.warnings.append(f"{file_path}: {path} - {message}")
+
+        elif isinstance(data, dict):
+            for key, value in data.items():
+                current_path = f"{path}.{key}" if path else key
+                self.check_hardcoded_urls(value, file_path, current_path)
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                current_path = f"{path}[{i}]"
+                self.check_hardcoded_urls(item, file_path, current_path)
+
+    def check_mqtt_topics(self, data: Any, file_path: Path, path: str = "") -> None:
+        """Check for placeholder or invalid MQTT topics."""
+        if isinstance(data, str):
+            for pattern_config in self.validation_config.mqtt_warning_patterns:
+                pattern = pattern_config.get("pattern", "")
+                message = pattern_config.get("message", "MQTT topic may be invalid")
+                if pattern and pattern.lower() in data.lower():
+                    self.warnings.append(f"{file_path}: {path} - {message}")
+
+        elif isinstance(data, dict):
+            # Only check values in MQTT-related keys
+            mqtt_keys = ("topic", "state_topic", "command_topic", "availability_topic")
+            for key, value in data.items():
+                current_path = f"{path}.{key}" if path else key
+                if key in mqtt_keys:
+                    self.check_mqtt_topics(value, file_path, current_path)
+                elif isinstance(value, (dict, list)):
+                    self.check_mqtt_topics(value, file_path, current_path)
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                current_path = f"{path}[{i}]"
+                self.check_mqtt_topics(item, file_path, current_path)
+
+    def validate_deprecated_patterns_in_file(self, file_path: Path) -> None:
+        """Validate a file for deprecated patterns."""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = yaml.load(f, Loader=HAYamlLoader)
+
+            if data is None:
+                return
+
+            # Check for deprecated patterns
+            self.check_deprecated_patterns(data, file_path)
+
+            # Check for hardcoded URLs
+            self.check_hardcoded_urls(data, file_path)
+
+            # Check for MQTT topic issues in MQTT config files
+            if "mqtt" in file_path.name.lower():
+                self.check_mqtt_topics(data, file_path)
+
+        except Exception:
+            pass  # Syntax errors are caught by validate_yaml_syntax
 
     def get_yaml_files(self) -> List[Path]:
         """Get all YAML files in the config directory."""
@@ -271,6 +325,9 @@ class YAMLValidator:
             self.validate_configuration_structure(file_path)
             self.validate_automations_structure(file_path)
             self.validate_scripts_structure(file_path)
+
+            # Check for deprecated patterns and best practices
+            self.validate_deprecated_patterns_in_file(file_path)
 
         return all_valid
 

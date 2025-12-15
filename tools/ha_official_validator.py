@@ -10,6 +10,9 @@ import sys
 from pathlib import Path
 from typing import List
 
+# Import shared modules
+from validation_config_loader import ValidationConfig
+
 
 class HAOfficialValidator:
     """Validates Home Assistant configuration using the official HA package."""
@@ -20,6 +23,7 @@ class HAOfficialValidator:
         self.errors: List[str] = []
         self.warnings: List[str] = []
         self.info: List[str] = []
+        self.validation_config = ValidationConfig.get_instance()
 
     def run_ha_check_config(self) -> bool:
         """Run Home Assistant's official check_config script."""
@@ -35,12 +39,13 @@ class HAOfficialValidator:
                 "check_config",
             ]
 
-            # Run the command
+            # Run the command with configurable timeout
+            timeout = self.validation_config.get_timeout("ha_check_config")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=timeout,
                 cwd=str(self.config_dir),
             )
 
@@ -95,26 +100,16 @@ class HAOfficialValidator:
         # Parse stderr for actual errors
         if stderr:
             lines = stderr.split("\n")
+            # Get ignore patterns from config
+            ignore_patterns = self.validation_config.stderr_ignore_patterns
+
             for line in lines:
                 line = line.strip()
                 if not line:
                     continue
 
-                # Filter out debug/info messages
-                if any(x in line.lower() for x in ["debug", "info:", "starting"]):
-                    continue
-
-                # Skip common non-error messages
-                if any(
-                    x in line.lower()
-                    for x in [
-                        "voluptuous",
-                        "setup of domain",
-                        "setup of platform",
-                        "loading",
-                        "initialized",
-                    ]
-                ):
+                # Filter out messages matching ignore patterns from config
+                if any(pattern.lower() in line.lower() for pattern in ignore_patterns):
                     continue
 
                 # This is likely an actual error

@@ -1,0 +1,151 @@
+# Home Assistant Validation Configuration
+# This file externalizes validation patterns and settings for easier maintenance
+# across different Home Assistant versions.
+
+# Minimum supported Home Assistant version
+min_ha_version: "2024.1.0"
+
+# Environment-specific error patterns
+# These errors occur in the local test environment but not in production.
+# They are reclassified as warnings instead of errors.
+environment_patterns:
+  # Mobile app integration issues
+  - pattern: "Integration 'mobile_app' could not be loaded"
+    reason: "Mobile app integration requires actual mobile devices"
+  - pattern: "Integration 'mobile_app' does not support"
+    reason: "Mobile app device automation not available in test env"
+
+  # Package build failures (native dependencies)
+  - pattern: "Unable to install package"
+    reason: "Package build failures in local environment"
+  - pattern: "Failed to build `"
+    reason: "Native package compilation failed"
+
+  # SSL certificate issues
+  - pattern: "not a file for dictionary value"
+    reason: "SSL certificate files not present in test env"
+  - pattern: "Invalid config for 'http'"
+    reason: "HTTP config with missing SSL files"
+
+  # Media/streaming dependencies
+  - pattern: "Requirements for stream not found"
+    reason: "av/stream package not available locally"
+  - pattern: "pkg-config is required for building PyAV"
+    reason: "PyAV build dependencies missing"
+
+  # Native library issues
+  - pattern: "libturbojpeg"
+    reason: "libturbojpeg not available locally"
+  - pattern: "turbojpeg library"
+    reason: "TurboJPEG library not installed"
+  - pattern: "RuntimeError:"
+    reason: "Runtime errors from missing native libs"
+  - pattern: "raise RuntimeError"
+    reason: "Runtime errors from missing native libs"
+
+  # Blueprint validation in test env
+  - pattern: "Blueprint '"
+    reason: "Blueprint validation may fail without full integration setup"
+  - pattern: "generated invalid automation"
+    reason: "Blueprint-generated automations may have env-specific issues"
+
+  # Voice/audio processing dependencies
+  - pattern: "pymicro-vad"
+    reason: "Voice activity detection package not available"
+  - pattern: "pyspeex-noise"
+    reason: "Audio processing package not available"
+
+# Deprecated schema patterns to warn about
+# These are valid but should be updated for best practices
+deprecated_patterns:
+  - pattern: "enabled: false"
+    context: "automation"
+    message: "Consider disabling automations via the UI instead of 'enabled: false'"
+    severity: "warning"
+
+  - pattern: "device_id:"
+    context: "any"
+    message: "device_id references are fragile - consider using entity_id instead"
+    severity: "warning"
+
+# Recommended automation fields
+# Warn if these are missing
+recommended_fields:
+  automation:
+    - field: "alias"
+      message: "Automations should have a descriptive alias"
+    - field: "mode"
+      message: "Consider specifying mode explicitly (single, restart, queued, parallel)"
+
+# stderr filter patterns
+# These messages in stderr should be ignored (not errors)
+stderr_ignore_patterns:
+  - "debug"
+  - "info:"
+  - "starting"
+  - "voluptuous"
+  - "setup of domain"
+  - "setup of platform"
+  - "loading"
+  - "initialized"
+  - "SetuptoolsDeprecationWarning"
+  - "License classifiers are deprecated"
+
+# Validation timeouts (in seconds)
+timeouts:
+  ha_check_config: 120
+  yaml_validation: 30
+  reference_validation: 60
+
+# Service domains that should always exist
+# Used for service call validation
+builtin_service_domains:
+  - homeassistant
+  - automation
+  - script
+  - scene
+  - input_boolean
+  - input_number
+  - input_select
+  - input_text
+  - input_datetime
+  - input_button
+  - counter
+  - timer
+  - group
+  - light
+  - switch
+  - cover
+  - fan
+  - climate
+  - media_player
+  - camera
+  - lock
+  - vacuum
+  - notify
+  - persistent_notification
+  - logbook
+  - logger
+  - system_log
+  - recorder
+  - frontend
+  - conversation
+  - tts
+
+# URL patterns that should be in secrets.yaml
+hardcoded_url_patterns:
+  - pattern: "nabu.casa"
+    message: "Nabu Casa URLs should be stored in secrets.yaml"
+  - pattern: "duckdns.org"
+    message: "DuckDNS URLs should be stored in secrets.yaml"
+  - pattern: "myopenhab.org"
+    message: "OpenHAB Cloud URLs should be stored in secrets.yaml"
+
+# MQTT topic patterns to warn about
+mqtt_warning_patterns:
+  - pattern: "placeholder"
+    message: "MQTT topic appears to be a placeholder"
+  - pattern: "example"
+    message: "MQTT topic appears to be an example"
+  - pattern: "test/"
+    message: "MQTT topic may be a test topic"
