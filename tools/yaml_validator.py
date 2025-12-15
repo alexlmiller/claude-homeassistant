@@ -1,11 +1,45 @@
 #!/usr/bin/env python3
 """YAML syntax validator for Home Assistant configuration files."""
 
+import re
 import sys
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import yaml
+
+
+class ValidationConfig:
+    """Load validation configuration from external file."""
+
+    def __init__(self, config_path: Optional[Path] = None):
+        """Initialize validation config."""
+        if config_path is None:
+            config_path = Path(__file__).parent / "validation_config.yaml"
+
+        self.config: Dict = {}
+        self.deprecated_patterns: List[Dict] = []
+        self.recommended_fields: Dict = {}
+        self.hardcoded_url_patterns: List[Dict] = []
+        self.mqtt_warning_patterns: List[Dict] = []
+
+        self._load_config(config_path)
+
+    def _load_config(self, config_path: Path) -> None:
+        """Load configuration from YAML file."""
+        if not config_path.exists():
+            return
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                self.config = yaml.safe_load(f) or {}
+
+            self.deprecated_patterns = self.config.get("deprecated_patterns", [])
+            self.recommended_fields = self.config.get("recommended_fields", {})
+            self.hardcoded_url_patterns = self.config.get("hardcoded_url_patterns", [])
+            self.mqtt_warning_patterns = self.config.get("mqtt_warning_patterns", [])
+        except Exception:
+            pass  # Use defaults if config fails to load
 
 
 class HAYamlLoader(yaml.SafeLoader):
@@ -79,6 +113,7 @@ class YAMLValidator:
         self.config_dir = Path(config_dir)
         self.errors: List[str] = []
         self.warnings: List[str] = []
+        self.validation_config = ValidationConfig()
 
     def validate_yaml_syntax(self, file_path: Path) -> bool:
         """Validate YAML syntax of a single file."""
@@ -181,6 +216,9 @@ class YAMLValidator:
                         f"{file_path}: Automation {i} missing 'alias' " f"(recommended)"
                     )
 
+                # Check automation best practices
+                self.validate_automation_best_practices(automation, file_path, i)
+
             return all_valid
         except Exception as e:
             self.errors.append(
@@ -232,6 +270,113 @@ class YAMLValidator:
             )
             return False
 
+    def check_deprecated_patterns(
+        self, data: Any, file_path: Path, context: str = "any", path: str = ""
+    ) -> None:
+        """Recursively check for deprecated patterns in configuration data."""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                current_path = f"{path}.{key}" if path else key
+
+                # Check for 'enabled: false' at automation level
+                if key == "enabled" and value is False:
+                    self.warnings.append(
+                        f"{file_path}: '{current_path}' - "
+                        "Consider disabling automations via the UI instead of 'enabled: false'"
+                    )
+
+                # Check for device_id usage
+                if key in ("device_id", "device_ids"):
+                    self.warnings.append(
+                        f"{file_path}: '{current_path}' - "
+                        "device_id references are fragile; consider using entity_id instead"
+                    )
+
+                # Recursively check nested structures
+                self.check_deprecated_patterns(value, file_path, context, current_path)
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                current_path = f"{path}[{i}]"
+                self.check_deprecated_patterns(item, file_path, context, current_path)
+
+    def check_hardcoded_urls(self, data: Any, file_path: Path, path: str = "") -> None:
+        """Check for hardcoded URLs that should be in secrets.yaml."""
+        if isinstance(data, str):
+            for pattern_config in self.validation_config.hardcoded_url_patterns:
+                pattern = pattern_config.get("pattern", "")
+                message = pattern_config.get("message", f"Hardcoded URL containing '{pattern}'")
+                if pattern and pattern in data:
+                    self.warnings.append(f"{file_path}: {path} - {message}")
+
+        elif isinstance(data, dict):
+            for key, value in data.items():
+                current_path = f"{path}.{key}" if path else key
+                self.check_hardcoded_urls(value, file_path, current_path)
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                current_path = f"{path}[{i}]"
+                self.check_hardcoded_urls(item, file_path, current_path)
+
+    def check_mqtt_topics(self, data: Any, file_path: Path, path: str = "") -> None:
+        """Check for placeholder or invalid MQTT topics."""
+        if isinstance(data, str):
+            for pattern_config in self.validation_config.mqtt_warning_patterns:
+                pattern = pattern_config.get("pattern", "")
+                message = pattern_config.get("message", f"MQTT topic may be invalid")
+                if pattern and pattern.lower() in data.lower():
+                    self.warnings.append(f"{file_path}: {path} - {message}")
+
+        elif isinstance(data, dict):
+            # Only check values in MQTT-related keys
+            mqtt_keys = ("topic", "state_topic", "command_topic", "availability_topic")
+            for key, value in data.items():
+                current_path = f"{path}.{key}" if path else key
+                if key in mqtt_keys:
+                    self.check_mqtt_topics(value, file_path, current_path)
+                elif isinstance(value, (dict, list)):
+                    self.check_mqtt_topics(value, file_path, current_path)
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                current_path = f"{path}[{i}]"
+                self.check_mqtt_topics(item, file_path, current_path)
+
+    def validate_automation_best_practices(
+        self, automation: Dict, file_path: Path, index: int
+    ) -> None:
+        """Check automation for best practices and recommended fields."""
+        # Check for mode field (recommended to be explicit)
+        if "mode" not in automation and "use_blueprint" not in automation:
+            alias = automation.get("alias", f"Automation {index}")
+            self.warnings.append(
+                f"{file_path}: '{alias}' - "
+                "Consider specifying 'mode' explicitly (single, restart, queued, parallel)"
+            )
+
+    def validate_deprecated_patterns_in_file(self, file_path: Path) -> None:
+        """Validate a file for deprecated patterns."""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = yaml.load(f, Loader=HAYamlLoader)
+
+            if data is None:
+                return
+
+            # Check for deprecated patterns
+            self.check_deprecated_patterns(data, file_path)
+
+            # Check for hardcoded URLs
+            self.check_hardcoded_urls(data, file_path)
+
+            # Check for MQTT topic issues in MQTT config files
+            if "mqtt" in file_path.name.lower():
+                self.check_mqtt_topics(data, file_path)
+
+        except Exception:
+            pass  # Syntax errors are caught by validate_yaml_syntax
+
     def get_yaml_files(self) -> List[Path]:
         """Get all YAML files in the config directory."""
         yaml_files: List[Path] = []
@@ -271,6 +416,9 @@ class YAMLValidator:
             self.validate_configuration_structure(file_path)
             self.validate_automations_structure(file_path)
             self.validate_scripts_structure(file_path)
+
+            # Check for deprecated patterns and best practices
+            self.validate_deprecated_patterns_in_file(file_path)
 
         return all_valid
 

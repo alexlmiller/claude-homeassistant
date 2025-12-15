@@ -2,13 +2,15 @@
 """Test suite runner for Home Assistant configuration validation.
 
 Runs all validators and provides a comprehensive report.
+Supports parallel execution for faster validation.
 """
 
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 class ValidationTestRunner:
@@ -67,10 +69,65 @@ class ValidationTestRunner:
             duration = end_time - start_time
             return (False, "", f"Failed to run validator: {e}", duration)
 
-    def run_all_tests(self) -> bool:
-        """Run all validation tests."""
-        validators = [
-            ("yaml_validator.py", "YAML Syntax Validation"),
+    def run_validators_parallel(
+        self, validators: List[Tuple[str, str]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Run multiple validators in parallel using ThreadPoolExecutor.
+
+        Args:
+            validators: List of (script_name, description) tuples
+
+        Returns:
+            Dictionary of results keyed by script_name
+        """
+        results = {}
+
+        with ThreadPoolExecutor(max_workers=len(validators)) as executor:
+            # Submit all validators
+            future_to_validator = {
+                executor.submit(
+                    self.run_validator, script_name, description
+                ): (script_name, description)
+                for script_name, description in validators
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_validator):
+                script_name, description = future_to_validator[future]
+                try:
+                    passed, stdout, stderr, duration = future.result()
+                    results[script_name] = {
+                        "description": description,
+                        "passed": passed,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "duration": duration,
+                    }
+                except Exception as e:
+                    results[script_name] = {
+                        "description": description,
+                        "passed": False,
+                        "stdout": "",
+                        "stderr": f"Exception during validation: {e}",
+                        "duration": 0.0,
+                    }
+
+        return results
+
+    def run_all_tests(self, parallel: bool = True) -> bool:
+        """Run all validation tests.
+
+        Args:
+            parallel: If True, run independent validators in parallel
+
+        Returns:
+            True if all tests passed, False otherwise
+        """
+        # First phase: YAML syntax validation (must pass before others)
+        yaml_validator = ("yaml_validator.py", "YAML Syntax Validation")
+
+        # Second phase: these can run in parallel
+        parallel_validators = [
             ("reference_validator.py", "Entity/Device Reference Validation"),
             (
                 "ha_official_validator.py",
@@ -85,30 +142,74 @@ class ValidationTestRunner:
         print("=" * 60)
         print()
 
-        for script_name, description in validators:
-            print(f"Running {description}...")
+        # Phase 1: Run YAML validator first (quick sanity check)
+        print(f"Phase 1: {yaml_validator[1]}...")
+        passed, stdout, stderr, duration = self.run_validator(*yaml_validator)
+        total_duration += duration
 
-            passed, stdout, stderr, duration = self.run_validator(
-                script_name, description
-            )
-            total_duration += duration
+        self.results[yaml_validator[0]] = {
+            "description": yaml_validator[1],
+            "passed": passed,
+            "stdout": stdout,
+            "stderr": stderr,
+            "duration": duration,
+        }
 
-            self.results[script_name] = {
-                "description": description,
-                "passed": passed,
-                "stdout": stdout,
-                "stderr": stderr,
-                "duration": duration,
-            }
+        if passed:
+            print(f"  ✅ PASSED ({duration:.2f}s)")
+        else:
+            print(f"  ❌ FAILED ({duration:.2f}s)")
+            all_passed = False
 
-            if passed:
-                print(f"  ✅ PASSED ({duration:.2f}s)")
-            else:
-                print(f"  ❌ FAILED ({duration:.2f}s)")
-                all_passed = False
+        print()
 
-            print()
+        # Phase 2: Run remaining validators (parallel if enabled)
+        if parallel and len(parallel_validators) > 1:
+            print(f"Phase 2: Running {len(parallel_validators)} validators in parallel...")
+            start_time = time.time()
 
+            parallel_results = self.run_validators_parallel(parallel_validators)
+
+            parallel_duration = time.time() - start_time
+            total_duration += parallel_duration
+
+            # Process results
+            for script_name, result in parallel_results.items():
+                self.results[script_name] = result
+                if result["passed"]:
+                    print(f"  ✅ {result['description']} ({result['duration']:.2f}s)")
+                else:
+                    print(f"  ❌ {result['description']} ({result['duration']:.2f}s)")
+                    all_passed = False
+
+            print(f"  (Parallel phase completed in {parallel_duration:.2f}s)")
+        else:
+            # Sequential execution
+            for script_name, description in parallel_validators:
+                print(f"Running {description}...")
+
+                passed, stdout, stderr, duration = self.run_validator(
+                    script_name, description
+                )
+                total_duration += duration
+
+                self.results[script_name] = {
+                    "description": description,
+                    "passed": passed,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "duration": duration,
+                }
+
+                if passed:
+                    print(f"  ✅ PASSED ({duration:.2f}s)")
+                else:
+                    print(f"  ❌ FAILED ({duration:.2f}s)")
+                    all_passed = False
+
+                print()
+
+        print()
         print(f"Total execution time: {total_duration:.2f}s")
         print("=" * 60)
 
@@ -190,8 +291,15 @@ class ValidationTestRunner:
 
         return True
 
-    def run(self) -> bool:
-        """Run the complete test suite."""
+    def run(self, parallel: bool = True) -> bool:
+        """Run the complete test suite.
+
+        Args:
+            parallel: If True, run independent validators in parallel
+
+        Returns:
+            True if all tests passed, False otherwise
+        """
         if not self.config_dir.exists():
             print(f"❌ Config directory not found: {self.config_dir}")
             return False
@@ -199,7 +307,7 @@ class ValidationTestRunner:
         if not self.check_dependencies():
             return False
 
-        all_passed = self.run_all_tests()
+        all_passed = self.run_all_tests(parallel=parallel)
 
         self.print_detailed_results()
         self.print_summary()
@@ -208,11 +316,27 @@ class ValidationTestRunner:
 
 
 def main():
-    """Run main function for command line usage."""
-    config_dir = sys.argv[1] if len(sys.argv) > 1 else "config"
+    """Run main function for command line usage.
+
+    Usage: run_tests.py [config_dir] [--sequential]
+
+    Options:
+        config_dir: Path to the config directory (default: config)
+        --sequential: Run validators sequentially instead of in parallel
+    """
+    # Parse arguments
+    args = sys.argv[1:]
+    parallel = True
+    config_dir = "config"
+
+    for arg in args:
+        if arg == "--sequential":
+            parallel = False
+        elif not arg.startswith("-"):
+            config_dir = arg
 
     runner = ValidationTestRunner(config_dir)
-    success = runner.run()
+    success = runner.run(parallel=parallel)
 
     sys.exit(0 if success else 1)
 
