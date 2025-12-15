@@ -4,7 +4,9 @@
 Validates that all entity references in configuration files actually exist.
 """
 
+import argparse
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -14,6 +16,9 @@ import yaml
 
 # Import shared modules
 from ha_yaml_loader import HAYamlLoader
+
+# Configure module logger
+logger = logging.getLogger(__name__)
 
 
 class DomainSummary(TypedDict):
@@ -44,63 +49,111 @@ class ReferenceValidator:
         self._areas: Optional[Dict[str, Any]] = None
 
     def load_entity_registry(self) -> Dict[str, Any]:
-        """Load and cache entity registry."""
+        """Load and cache entity registry.
+
+        Returns:
+            Dict mapping entity_id to entity data
+        """
         if self._entities is None:
             registry_file = self.storage_dir / "core.entity_registry"
             if not registry_file.exists():
+                logger.error(f"Entity registry not found: {registry_file}")
                 self.errors.append(f"Entity registry not found: {registry_file}")
                 return {}
 
             try:
-                with open(registry_file, "r") as f:
+                logger.debug(f"Loading entity registry from: {registry_file}")
+                with open(registry_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self._entities = {
                         entity["entity_id"]: entity
                         for entity in data.get("data", {}).get("entities", [])
                     }
+                logger.debug(f"Loaded {len(self._entities)} entities")
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON in entity registry: {e}")
+                self.errors.append(f"Invalid JSON in entity registry: {e}")
+                return {}
+            except PermissionError:
+                logger.error(f"Permission denied reading: {registry_file}")
+                self.errors.append(f"Permission denied reading entity registry")
+                return {}
             except Exception as e:
+                logger.exception(f"Failed to load entity registry")
                 self.errors.append(f"Failed to load entity registry: {e}")
                 return {}
 
         return self._entities
 
     def load_device_registry(self) -> Dict[str, Any]:
-        """Load and cache device registry."""
+        """Load and cache device registry.
+
+        Returns:
+            Dict mapping device_id to device data
+        """
         if self._devices is None:
             registry_file = self.storage_dir / "core.device_registry"
             if not registry_file.exists():
+                logger.error(f"Device registry not found: {registry_file}")
                 self.errors.append(f"Device registry not found: {registry_file}")
                 return {}
 
             try:
-                with open(registry_file, "r") as f:
+                logger.debug(f"Loading device registry from: {registry_file}")
+                with open(registry_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self._devices = {
                         device["id"]: device
                         for device in data.get("data", {}).get("devices", [])
                     }
+                logger.debug(f"Loaded {len(self._devices)} devices")
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON in device registry: {e}")
+                self.errors.append(f"Invalid JSON in device registry: {e}")
+                return {}
+            except PermissionError:
+                logger.error(f"Permission denied reading: {registry_file}")
+                self.errors.append(f"Permission denied reading device registry")
+                return {}
             except Exception as e:
+                logger.exception(f"Failed to load device registry")
                 self.errors.append(f"Failed to load device registry: {e}")
                 return {}
 
         return self._devices
 
     def load_area_registry(self) -> Dict[str, Any]:
-        """Load and cache area registry."""
+        """Load and cache area registry.
+
+        Returns:
+            Dict mapping area_id to area data
+        """
         if self._areas is None:
             registry_file = self.storage_dir / "core.area_registry"
             if not registry_file.exists():
+                logger.debug(f"Area registry not found: {registry_file}")
                 self.warnings.append(f"Area registry not found: {registry_file}")
                 return {}
 
             try:
-                with open(registry_file, "r") as f:
+                logger.debug(f"Loading area registry from: {registry_file}")
+                with open(registry_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self._areas = {
                         area["id"]: area
                         for area in data.get("data", {}).get("areas", [])
                     }
+                logger.debug(f"Loaded {len(self._areas)} areas")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Invalid JSON in area registry: {e}")
+                self.warnings.append(f"Invalid JSON in area registry: {e}")
+                return {}
+            except PermissionError:
+                logger.warning(f"Permission denied reading: {registry_file}")
+                self.warnings.append(f"Permission denied reading area registry")
+                return {}
             except Exception as e:
+                logger.warning(f"Failed to load area registry: {e}")
                 self.warnings.append(f"Failed to load area registry: {e}")
                 return {}
 
@@ -452,14 +505,57 @@ class ReferenceValidator:
             print("❌ Invalid entity/device references found")
 
 
+def setup_logging(verbose: bool = False) -> None:
+    """Configure logging based on verbosity level.
+
+    Args:
+        verbose: If True, set logging to DEBUG level
+    """
+    level = logging.DEBUG if verbose else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments.
+
+    Returns:
+        Parsed arguments namespace
+    """
+    parser = argparse.ArgumentParser(
+        description="Validate entity and device references in Home Assistant config",
+    )
+    parser.add_argument(
+        "config_dir",
+        nargs="?",
+        default="config",
+        help="Path to Home Assistant config directory (default: config)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose debug output",
+    )
+
+    return parser.parse_args()
+
+
 def main():
     """Run entity and device reference validation from command line."""
-    config_dir = sys.argv[1] if len(sys.argv) > 1 else "config"
+    args = parse_args()
 
-    validator = ReferenceValidator(config_dir)
+    setup_logging(args.verbose)
+    logger.info(f"Starting reference validation for: {args.config_dir}")
+
+    validator = ReferenceValidator(args.config_dir)
     is_valid = validator.validate_all()
     validator.print_results()
 
+    logger.info(f"Validation complete: {'PASSED' if is_valid else 'FAILED'}")
     sys.exit(0 if is_valid else 1)
 
 

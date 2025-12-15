@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """YAML syntax validator for Home Assistant configuration files."""
 
+import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -10,6 +12,9 @@ import yaml
 # Import shared modules
 from ha_yaml_loader import HAYamlLoader
 from validation_config_loader import ValidationConfig
+
+# Configure module logger
+logger = logging.getLogger(__name__)
 
 
 class YAMLValidator:
@@ -23,18 +28,38 @@ class YAMLValidator:
         self.validation_config = ValidationConfig.get_instance()
 
     def validate_yaml_syntax(self, file_path: Path) -> bool:
-        """Validate YAML syntax of a single file."""
+        """Validate YAML syntax of a single file.
+
+        Args:
+            file_path: Path to the YAML file to validate
+
+        Returns:
+            True if YAML syntax is valid, False otherwise
+        """
+        logger.debug(f"Validating YAML syntax: {file_path}")
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 yaml.load(f, Loader=HAYamlLoader)
+            logger.debug(f"YAML syntax valid: {file_path}")
             return True
         except yaml.YAMLError as e:
+            logger.warning(f"YAML syntax error in {file_path}: {e}")
             self.errors.append(f"{file_path}: YAML syntax error - {e}")
             return False
         except UnicodeDecodeError as e:
+            logger.warning(f"Encoding error in {file_path}: {e}")
             self.errors.append(f"{file_path}: Encoding error - {e}")
             return False
+        except FileNotFoundError:
+            logger.error(f"File not found: {file_path}")
+            self.errors.append(f"{file_path}: File not found")
+            return False
+        except PermissionError:
+            logger.error(f"Permission denied reading: {file_path}")
+            self.errors.append(f"{file_path}: Permission denied")
+            return False
         except Exception as e:
+            logger.exception(f"Unexpected error validating {file_path}")
             self.errors.append(f"{file_path}: Unexpected error - {e}")
             return False
 
@@ -265,12 +290,18 @@ class YAMLValidator:
                 self.check_mqtt_topics(item, file_path, current_path)
 
     def validate_deprecated_patterns_in_file(self, file_path: Path) -> None:
-        """Validate a file for deprecated patterns."""
+        """Validate a file for deprecated patterns.
+
+        Args:
+            file_path: Path to the YAML file to check
+        """
+        logger.debug(f"Checking deprecated patterns in: {file_path}")
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 data = yaml.load(f, Loader=HAYamlLoader)
 
             if data is None:
+                logger.debug(f"File is empty, skipping pattern check: {file_path}")
                 return
 
             # Check for deprecated patterns
@@ -283,8 +314,14 @@ class YAMLValidator:
             if "mqtt" in file_path.name.lower():
                 self.check_mqtt_topics(data, file_path)
 
-        except Exception:
-            pass  # Syntax errors are caught by validate_yaml_syntax
+        except yaml.YAMLError:
+            # Syntax errors are already caught and reported by validate_yaml_syntax
+            logger.debug(f"Skipping pattern check due to YAML error: {file_path}")
+        except Exception as e:
+            # Log unexpected errors but don't fail - pattern checking is advisory
+            logger.warning(
+                f"Could not check deprecated patterns in {file_path}: {e}"
+            )
 
     def get_yaml_files(self) -> List[Path]:
         """Get all YAML files in the config directory."""
@@ -353,14 +390,57 @@ class YAMLValidator:
             print("❌ YAML validation failed")
 
 
+def setup_logging(verbose: bool = False) -> None:
+    """Configure logging based on verbosity level.
+
+    Args:
+        verbose: If True, set logging to DEBUG level
+    """
+    level = logging.DEBUG if verbose else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments.
+
+    Returns:
+        Parsed arguments namespace
+    """
+    parser = argparse.ArgumentParser(
+        description="Validate YAML syntax for Home Assistant configuration files",
+    )
+    parser.add_argument(
+        "config_dir",
+        nargs="?",
+        default="config",
+        help="Path to Home Assistant config directory (default: config)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose debug output",
+    )
+
+    return parser.parse_args()
+
+
 def main():
     """Run YAML syntax validation from command line."""
-    config_dir = sys.argv[1] if len(sys.argv) > 1 else "config"
+    args = parse_args()
 
-    validator = YAMLValidator(config_dir)
+    setup_logging(args.verbose)
+    logger.info(f"Starting YAML validation for: {args.config_dir}")
+
+    validator = YAMLValidator(args.config_dir)
     is_valid = validator.validate_all()
     validator.print_results()
 
+    logger.info(f"Validation complete: {'PASSED' if is_valid else 'FAILED'}")
     sys.exit(0 if is_valid else 1)
 
 
