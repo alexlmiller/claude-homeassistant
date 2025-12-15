@@ -76,7 +76,7 @@ diff: check-env
 	@echo ""
 	@rsync -avzni --delete --filter='merge .rsync-filter' $(LOCAL_CONFIG_PATH) $(HA_HOST):$(HA_REMOTE_PATH) | grep -v "^$$" || echo "$(GREEN)No differences found.$(NC)"
 	@echo ""
-	@echo "$(YELLOW)Legend: < = local only, > = remote only, c = changed$(NC)"
+	@echo "$(YELLOW)Files shown above would be synced. Run 'make push' to apply.$(NC)"
 
 # Restore configuration from a backup
 rollback:
