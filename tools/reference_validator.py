@@ -21,6 +21,18 @@ from validation_config_loader import ValidationConfig
 # Configure module logger
 logger = logging.getLogger(__name__)
 
+# Precompiled regex patterns for entity extraction from templates
+# These are compiled once at module load for better performance
+_ENTITY_PATTERNS = [
+    re.compile(r"states\('([^']+)'\)"),  # states('entity.id')
+    re.compile(r'states\("([^"]+)"\)'),  # states("entity.id")
+    re.compile(r"states\.([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*)"),  # states.domain.entity
+    re.compile(r"is_state\('([^']+)'"),  # is_state('entity.id', ...)
+    re.compile(r'is_state\("([^"]+)"'),  # is_state("entity.id", ...)
+    re.compile(r"state_attr\('([^']+)'"),  # state_attr('entity.id', ...)
+    re.compile(r'state_attr\("([^"]+)"'),  # state_attr("entity.id", ...)
+]
+
 
 class DomainSummary(TypedDict):
     """Type definition for domain summary dictionary."""
@@ -174,13 +186,19 @@ class ReferenceValidator:
         return bool(re.search(r"\{\{.*?\}\}", value))
 
     def should_skip_entity_validation(self, value: str) -> bool:
-        """Check if entity reference should be skipped during validation."""
+        """Check if entity reference should be skipped during validation.
+
+        Skips validation for:
+        - HA special tags (!input, !secret, !include, etc.)
+        - UUID format strings (device-based entity references)
+        - Jinja2 template expressions ({{ ... }})
+        - Special keywords like "all" or "none"
+        """
         return (
-            value.startswith("!")
-            or self.is_uuid_format(value)  # HA tags like !input, !secret
-            or self.is_template(value)  # UUID format (device-based)
-            or value  # Template expressions
-            in self.SPECIAL_KEYWORDS  # Special keywords like "all", "none"
+            value.startswith("!")              # HA tags: !input, !secret, etc.
+            or self.is_uuid_format(value)      # UUID format (device-based)
+            or self.is_template(value)         # Jinja2 template expressions
+            or value in self.SPECIAL_KEYWORDS  # Keywords: "all", "none"
         )
 
     def extract_entity_references(self, data: Any, path: str = "") -> Set[str]:
@@ -235,23 +253,15 @@ class ReferenceValidator:
         return entities
 
     def extract_entities_from_template(self, template: str) -> Set[str]:
-        """Extract entity references from Jinja2 templates."""
+        """Extract entity references from Jinja2 templates.
+
+        Uses precompiled regex patterns from _ENTITY_PATTERNS for better
+        performance when processing many templates.
+        """
         entities = set()
 
-        # Common patterns for entity references in templates
-        patterns = [
-            r"states\('([^']+)'\)",  # states('entity.id')
-            r'states\("([^"]+)"\)',  # states("entity.id")
-            # states.domain.entity
-            r"states\.([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*)",
-            r"is_state\('([^']+)'",  # is_state('entity.id', ...)
-            r'is_state\("([^"]+)"',  # is_state("entity.id", ...)
-            r"state_attr\('([^']+)'",  # state_attr('entity.id', ...)
-            r'state_attr\("([^"]+)"',  # state_attr("entity.id", ...)
-        ]
-
-        for pattern in patterns:
-            matches = re.findall(pattern, template)
+        for pattern in _ENTITY_PATTERNS:
+            matches = pattern.findall(template)
             for match in matches:
                 # Validate entity ID format
                 if "." in match and len(match.split(".")) == 2:

@@ -1,6 +1,9 @@
 #!/bin/bash
 # Post-tool-use hook to validate Home Assistant configuration after file changes
 
+# Configuration: Set HA_VALIDATION_STRICT=false to warn only instead of blocking
+STRICT_MODE=${HA_VALIDATION_STRICT:-true}
+
 # Check if we're in a home assistant config project
 if [ ! -f "config/configuration.yaml" ]; then
     exit 0  # Not a HA project, skip
@@ -29,7 +32,13 @@ if [[ "$CLAUDE_TOOL_NAME" == "Edit" || "$CLAUDE_TOOL_NAME" == "Write" || "$CLAUD
             echo "❌ Home Assistant configuration validation failed!"
             echo "   Please fix the errors above before pushing to Home Assistant."
             echo ""
-            # Don't exit with error code to avoid blocking Claude, just warn
+
+            if [ "$STRICT_MODE" = "true" ]; then
+                exit 1  # Block Claude from continuing
+            else
+                echo "⚠️  Warning mode: Continuing despite validation errors"
+                echo "   Set HA_VALIDATION_STRICT=true to block on errors"
+            fi
         else
             echo "✅ Home Assistant configuration validation passed!"
         fi
