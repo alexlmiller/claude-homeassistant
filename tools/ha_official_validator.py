@@ -5,13 +5,17 @@ This leverages Home Assistant's own validation tools for the most
 accurate results.
 """
 
+import logging
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
 # Import shared modules
 from validation_config_loader import ValidationConfig
+
+logger = logging.getLogger(__name__)
 
 
 class HAOfficialValidator:
@@ -24,6 +28,79 @@ class HAOfficialValidator:
         self.warnings: List[str] = []
         self.info: List[str] = []
         self.validation_config = ValidationConfig.get_instance()
+        self.ha_version: Optional[str] = None
+
+    def get_ha_version(self) -> Optional[str]:
+        """Get the installed Home Assistant version.
+
+        Returns:
+            Version string (e.g., '2024.12.0') or None if not installed.
+        """
+        if self.ha_version is not None:
+            return self.ha_version
+
+        try:
+            import homeassistant.const as ha_const
+
+            self.ha_version = ha_const.__version__
+            return self.ha_version
+        except ImportError:
+            logger.warning("Home Assistant package not installed")
+            return None
+        except Exception as e:
+            logger.warning(f"Could not determine HA version: {e}")
+            return None
+
+    def check_version_compatibility(self) -> bool:
+        """Check if installed HA version meets minimum requirements.
+
+        Returns:
+            True if compatible, False otherwise.
+        """
+        version = self.get_ha_version()
+        if version is None:
+            self.warnings.append(
+                "Could not determine Home Assistant version - skipping version check"
+            )
+            return True
+
+        min_version = self.validation_config.min_ha_version
+        if not min_version:
+            return True
+
+        try:
+            # Parse versions for comparison (handles versions like 2024.12.0)
+            current_parts = self._parse_version(version)
+            min_parts = self._parse_version(min_version)
+
+            if current_parts < min_parts:
+                self.warnings.append(
+                    f"Home Assistant version {version} is below minimum "
+                    f"supported version {min_version}"
+                )
+                return False
+
+            self.info.append(f"Home Assistant version: {version}")
+            return True
+
+        except Exception as e:
+            logger.warning(f"Version comparison failed: {e}")
+            self.info.append(f"Home Assistant version: {version}")
+            return True
+
+    def _parse_version(self, version_str: str) -> Tuple[int, ...]:
+        """Parse a version string into comparable tuple.
+
+        Args:
+            version_str: Version string like '2024.12.0' or '2024.12.0b1'
+
+        Returns:
+            Tuple of version components for comparison.
+        """
+        # Remove any suffix like 'b1', 'dev', etc.
+        clean_version = re.sub(r"[a-zA-Z].*$", "", version_str)
+        parts = clean_version.split(".")
+        return tuple(int(p) for p in parts if p.isdigit())
 
     def run_ha_check_config(self) -> bool:
         """Run Home Assistant's official check_config script."""
@@ -115,6 +192,30 @@ class HAOfficialValidator:
                 # This is likely an actual error
                 self.errors.append(f"HA Error: {line}")
 
+    def reclassify_environment_errors(self) -> None:
+        """Reclassify environment-specific errors as warnings.
+
+        Some errors occur only in the test environment (missing native libs,
+        mobile app integration, etc.) but don't indicate actual config problems.
+        This method moves those errors to warnings for clearer output.
+        """
+        env_patterns = self.validation_config.environment_patterns
+
+        if not env_patterns:
+            return
+
+        errors_to_remove = []
+        for error in self.errors:
+            for pattern in env_patterns:
+                if pattern.lower() in error.lower():
+                    errors_to_remove.append(error)
+                    self.warnings.append(f"[Env] {error}")
+                    logger.debug(f"Reclassified as env warning: {error}")
+                    break
+
+        for error in errors_to_remove:
+            self.errors.remove(error)
+
     def validate_all(self) -> bool:
         """Run complete validation using Home Assistant."""
         if not self.config_dir.exists():
@@ -127,8 +228,17 @@ class HAOfficialValidator:
             self.errors.append("configuration.yaml not found")
             return False
 
+        # Check HA version compatibility
+        self.check_version_compatibility()
+
         # Run the official Home Assistant validation
-        return self.run_ha_check_config()
+        result = self.run_ha_check_config()
+
+        # Reclassify environment-specific errors as warnings
+        self.reclassify_environment_errors()
+
+        # Return success if no real errors remain
+        return len(self.errors) == 0
 
     def print_results(self):
         """Print validation results."""
